@@ -116,7 +116,7 @@ export class UniFiSmartPower {
   ) {
     this.cache = caching('memory', {
       ttl: 0, // No default ttl
-      max: 0, // Infinite capacity
+      max: Number.MAX_SAFE_INTEGER, // Infinite capacity
     });
     this.controller = new Controller({
       host: this.config.host,
