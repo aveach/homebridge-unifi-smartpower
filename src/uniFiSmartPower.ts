@@ -10,6 +10,7 @@ export interface UniFiDeviceStatus {
   device: UniFiDevice;
   ports: UniFiSwitchPort[];
   outlets: UniFiSmartPowerOutlet[];
+  rpsPorts: UniFiRpsPort[];
 }
 
 export interface UniFiDevice {
@@ -43,8 +44,19 @@ export interface UniFiSwitchPort {
   override: UniFiApiDeviceSwitchPortOverride;
 }
 
+export interface UniFiRpsPort {
+  index: number;
+  name: string;
+  portMode: UniFiRpsPortMode;
+  inUse: UniFiPortOrOutletInUse;
+  active: boolean;
+  entry: UniFiApiDeviceRpsPortTable;
+  override: UniFiApiDeviceRpsPortTableOverride;
+}
+
 export type UniFiSwitchPortPoeMode = 'unknown' | 'auto' | 'passthrough' | 'pasv24' | 'off';
 export type UniFiSwitchPortPoeModeAction = 'auto' | 'passthrough' | 'pasv24' | 'off';
+export type UniFiRpsPortMode = 'auto' | 'disabled';
 
 export enum UniFiSmartPowerOutletState {
   UNKNOWN = -1,
@@ -63,9 +75,15 @@ export enum UniFiSmartPowerOutletAction {
   ON = 1,
 }
 
+export enum UniFiRpsPortAction {
+  OFF = 0,
+  ON = 1,
+}
+
 export enum UniFiDeviceKind {
   OUTLET = 0,
   PORT = 1,
+  RPS_PORT = 2,
 }
 
 export const UniFiSwitchPortPoeCaps = {
@@ -135,7 +153,10 @@ export class UniFiSmartPower {
     device: UniFiDevice,
     kind: UniFiDeviceKind,
     index: number,
-    func: ((outlet: UniFiSmartPowerOutlet) => void) | ((port: UniFiSwitchPort) => void),
+    func:
+      | ((outlet: UniFiSmartPowerOutlet) => void)
+      | ((port: UniFiSwitchPort) => void)
+      | ((rpsPort: UniFiRpsPort) => void),
   ): Token {
     const topic = UniFiSmartPower.statusTopic(device, kind, index);
     const token = PubSub.subscribe(topic, async (_, data) => {
@@ -145,8 +166,12 @@ export class UniFiSmartPower {
       func(data);
     });
     this.log.debug(
-      '[API] Status subscription added for %s %s.%s [token=%s]',
-      kind === UniFiDeviceKind.PORT ? 'port' : 'outlet',
+      '[API] Status subscription added for%s %s.%s [token=%s]',
+      {
+        [UniFiDeviceKind.OUTLET]: ' outlet',
+        [UniFiDeviceKind.PORT]: ' port',
+        [UniFiDeviceKind.RPS_PORT]: ' RPS port',
+      }[kind] ?? '',
       device.mac,
       index,
       token,
@@ -170,6 +195,10 @@ export class UniFiSmartPower {
             case UniFiDeviceKind.PORT:
               this.log.debug('[API] Polling status for port %s.%s', device.mac, index);
               PubSub.publish(topic, await this.getPortStatus(device, index));
+              break;
+            case UniFiDeviceKind.RPS_PORT:
+              this.log.debug('[API] Polling status for RPS port %s.%s', device.mac, index);
+              PubSub.publish(topic, await this.getRpsPortStatus(device, index));
               break;
             default:
               // noinspection ExceptionCaughtLocallyJS
@@ -248,7 +277,9 @@ export class UniFiSmartPower {
             result
               .filter(
                 (device: UniFiApiDevice) =>
-                  (device.outlet_table ?? []).length > 0 || (device.port_table ?? []).length > 0,
+                  (device.outlet_table ?? []).length > 0 ||
+                  (device.port_table ?? []).length > 0 ||
+                  (device?.rps?.rps_port_table ?? []).length > 0,
               )
               .map((device: UniFiApiDevice) =>
                 UniFiSmartPower.transformDeviceStatusResponse(site, device),
@@ -279,6 +310,8 @@ export class UniFiSmartPower {
       port_overrides: portOverrides,
       outlet_table: outlets,
       outlet_overrides: outletOverrides,
+      rps: rps,
+      rps_override: rpsPortOverride,
     }: UniFiApiDevice,
   ): UniFiDeviceStatus {
     return {
@@ -330,6 +363,25 @@ export class UniFiSmartPower {
           }),
         ) ?? []
       ).filter((o) => o.override && o.entry),
+      rpsPorts: (
+        rps?.rps_port_table.map(
+          (entry: UniFiApiDeviceRpsPortTable): UniFiRpsPort => ({
+            index: entry.port_idx,
+            name: entry.name ?? `RPS Port ${entry.port_idx}`,
+            portMode: entry.port_mode || 'disabled',
+            inUse: entry.power_delivering ? 1 : 0,
+            active: !!entry.power_active,
+            entry,
+            override:
+              rpsPortOverride?.rps_port_table?.find((p) => p?.port_idx === entry.port_idx) ??
+              (Object.fromEntries(
+                Object.entries(entry).filter(([k]) =>
+                  ['port_idx', 'name', 'port_mode'].includes(k),
+                ),
+              ) as UniFiApiDeviceRpsPortTableOverride),
+          }),
+        ) ?? []
+      ).filter((p) => p.override && p.entry),
     };
   }
 
@@ -388,6 +440,15 @@ export class UniFiSmartPower {
     return outletInfo;
   }
 
+  async getRpsPortStatus(device: UniFiDevice, portIndex: number): Promise<UniFiRpsPort> {
+    const { rpsPorts } = await this.getDeviceStatus(device);
+    const portInfo = rpsPorts.find(({ index }) => index === portIndex) ?? null;
+    if (portInfo === null) {
+      throw new Error(`unknown rps port with id=${portIndex}`);
+    }
+    return portInfo;
+  }
+
   async commandOutlet(
     device: UniFiDevice,
     outletIndex: number,
@@ -422,6 +483,33 @@ export class UniFiSmartPower {
           ...port.override,
           poe_mode: port.index === portIndex ? poeMode : port.poeMode,
         })),
+      });
+      await (await this.cache).del(UniFiSmartPower.deviceCacheKey(device));
+      await (await this.cache).del(UniFiSmartPower.deviceCacheKey());
+    });
+  }
+
+  async commandRpsPort(
+    device: UniFiDevice,
+    portIndex: number,
+    command: UniFiRpsPortAction,
+  ): Promise<void> {
+    return this.lock.acquire(UniFiSmartPower.CONTROLLER_LOCK, async () => {
+      const { rpsPorts } = await this.getDeviceStatus(device, false);
+      this.controller.opts.site = device.site;
+      await this.controller.login();
+      await this.controller.setDeviceSettingsBase(device.id, {
+        rps_override: {
+          rps_port_table: rpsPorts.map((port) => ({
+            ...port.override,
+            port_mode:
+              port.index === portIndex
+                ? command === UniFiRpsPortAction.ON
+                  ? 'auto'
+                  : 'disabled'
+                : port.portMode,
+          })),
+        },
       });
       await (await this.cache).del(UniFiSmartPower.deviceCacheKey(device));
       await (await this.cache).del(UniFiSmartPower.deviceCacheKey());
@@ -471,6 +559,8 @@ type UniFiApiDevice = {
   port_overrides: UniFiApiDeviceSwitchPortOverride[] | null | undefined;
   outlet_table: UniFiApiDeviceOutletTable[] | null | undefined;
   outlet_overrides: UniFiApiDeviceOutletOverride[] | null | undefined;
+  rps: UniFiApiDeviceRps | null | undefined;
+  rps_override: UniFiApiDeviceRpsPortOverride | null | undefined;
 };
 
 type UniFiApiDeviceSwitchPortTable = {
@@ -488,6 +578,30 @@ type UniFiApiDeviceSwitchPortOverride = {
   port_idx: number;
   name?: string;
   poe_mode: UniFiSwitchPortPoeModeAction;
+};
+
+type UniFiApiDeviceRpsPortTable = {
+  port_idx: number;
+  name?: string;
+  port_mode?: UniFiRpsPortMode;
+  up?: boolean;
+  power_active?: boolean;
+  power_delivering?: boolean;
+  // many others
+};
+
+type UniFiApiDeviceRpsPortTableOverride = {
+  port_idx: number;
+  name?: string;
+  port_mode: UniFiRpsPortMode;
+};
+
+type UniFiApiDeviceRpsPortOverride = {
+  rps_port_table: UniFiApiDeviceRpsPortTableOverride[];
+};
+
+type UniFiApiDeviceRps = {
+  rps_port_table: UniFiApiDeviceRpsPortTable[];
 };
 
 type UniFiApiDeviceOutletTable = {

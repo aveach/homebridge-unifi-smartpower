@@ -169,6 +169,32 @@
         "default": false,
         "required": false
       },
+      "includeRpsPorts": {
+        "title": "Include RPS Ports",
+        "type": "array",
+        "default": [],
+        "required": false,
+        "items": {
+          "title": "RPS Port ID",
+          "type": "string"
+        }
+      },
+      "excludeRpsPorts": {
+        "title": "Exclude RPS Ports",
+        "type": "array",
+        "default": [],
+        "required": false,
+        "items": {
+          "title": "RPS Port ID",
+          "type": "string"
+        }
+      },
+      "includeInactiveRpsPorts": {
+        "title": "Show RPS ports that are not connected",
+        "type": "boolean",
+        "default": false,
+        "required": false
+      },
       "refreshDevicesPollInterval": {
         "title": "Refresh Devices Poll Interval (in seconds)",
         "type": "integer",
@@ -280,6 +306,21 @@
           "items": ["excludePorts[]"]
         },
         "includeInactivePorts",
+        {
+          "key": "includeRpsPorts",
+          "type": "array",
+          "name": "Included RPS Ports",
+          "orderable": false,
+          "items": ["includeRpsPorts[]"]
+        },
+        {
+          "key": "excludeRpsPorts",
+          "type": "array",
+          "name": "Excluded RPS Ports",
+          "orderable": false,
+          "items": ["excludeRpsPorts[]"]
+        },
+        "includeInactiveRpsPorts",
         "refreshDevicesPollInterval",
         "outletStatusCacheTtl",
         "outletStatusPollInterval",

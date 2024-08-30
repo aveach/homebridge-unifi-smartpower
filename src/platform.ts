@@ -14,6 +14,7 @@ import {
   UniFiSmartPowerOutletPlatformAccessory,
   UniFiDevicePlatformAccessoryContext,
   UniFiSwitchPortPlatformAccessory,
+  UniFiRpsPortPlatformAccessory,
 } from './platformAccessory';
 import {
   UniFiSmartPower,
@@ -39,6 +40,9 @@ type UniFiSmartPowerHomebridgePlatformConfig = PlatformConfig &
     includeInactivePorts?: boolean;
     excludePorts?: string[];
     includePorts?: string[];
+    includeInactiveRpsPorts?: boolean;
+    excludeRpsPorts?: string[];
+    includeRpsPorts?: string[];
     logApiResponses?: boolean;
   };
 
@@ -48,6 +52,7 @@ interface UniFiControlSwitchConfig {
   timeout?: number;
   guardOutlets?: boolean;
   guardSwitchPorts?: boolean;
+  guardRpsPorts?: boolean;
 }
 
 export class UniFiSmartPowerHomebridgePlatform implements DynamicPlatformPlugin {
@@ -91,6 +96,7 @@ export class UniFiSmartPowerHomebridgePlatform implements DynamicPlatformPlugin 
     const uuids: Set<string> = new Set();
     let isOutletEnabled = () => true;
     let isSwitchPortEnabled = () => true;
+    let isRpsPortEnabled = () => true;
     if (
       this.config.controlSwitch?.create &&
       (this.config.controlSwitch.guardOutlets || this.config.controlSwitch.guardSwitchPorts)
@@ -100,6 +106,7 @@ export class UniFiSmartPowerHomebridgePlatform implements DynamicPlatformPlugin 
         timeout = 0,
         guardOutlets = true,
         guardSwitchPorts = true,
+        guardRpsPorts = true,
       } = this.config.controlSwitch;
       const uuid = this.api.hap.uuid.generate('');
       const existingAccessory = this.accessories.find((accessory) => accessory.UUID === uuid);
@@ -115,6 +122,7 @@ export class UniFiSmartPowerHomebridgePlatform implements DynamicPlatformPlugin 
         timeout,
         guardOutlets,
         guardSwitchPorts,
+        guardRpsPorts,
       };
       if (existingAccessory) {
         this.log.log(
@@ -134,6 +142,9 @@ export class UniFiSmartPowerHomebridgePlatform implements DynamicPlatformPlugin 
       }
       if (this.config.controlSwitch.guardSwitchPorts) {
         isSwitchPortEnabled = () => control.isEnabled();
+      }
+      if (this.config.controlSwitch.guardRpsPorts) {
+        isRpsPortEnabled = () => control.isEnabled();
       }
     }
     let sites: UniFiSite[];
@@ -279,6 +290,34 @@ export class UniFiSmartPowerHomebridgePlatform implements DynamicPlatformPlugin 
           );
           hasAnyAccessories = true;
           new UniFiSwitchPortPlatformAccessory(this, accessory, port, isSwitchPortEnabled);
+        }
+
+        for (const rpsPort of deviceStatus.rpsPorts) {
+          if (!rpsPort.active && !this.config.includeInactiveRpsPorts) {
+            continue;
+          }
+          // Use the name of the device if there is only a single port.
+          if (deviceStatus.ports.length === 1) {
+            rpsPort.name = `${deviceStatus.device.name} ${rpsPort.name}`;
+          }
+          const accessoryId = `${deviceStatus.device.serialNumber}.${rpsPort.index}`;
+          if (
+            Array.isArray(this.config.excludeRpsPorts) &&
+            this.config.excludeRpsPorts.includes(accessoryId)
+          ) {
+            continue;
+          }
+          if (
+            Array.isArray(this.config.includeRpsPorts) &&
+            !this.config.includeRpsPorts.includes(accessoryId)
+          ) {
+            continue;
+          }
+          logMessages.push(
+            `RPS Port [${deviceStatus.device.serialNumber}.${rpsPort.index}]: ${deviceStatus.device.name} > ${rpsPort.name}`,
+          );
+          hasAnyAccessories = true;
+          new UniFiRpsPortPlatformAccessory(this, accessory, rpsPort, isRpsPortEnabled);
         }
 
         patches.forEach((unpatch) => unpatch());
