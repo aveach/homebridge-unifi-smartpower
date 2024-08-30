@@ -55,11 +55,12 @@ commands to control an outlet/switch will be ignored:
     {
       // ... required config, see above
       "controlSwitch": {
-        "create": <true/false>,          // Defaults to false.
-        "name": "<name>",                // Defaults to "UniFi Control Enabled".
-        "timeout": <number>,             // Timeout (in seconds) before the control switch reverts. Defaults to 60s. 0 disables the timeout.
-        "guardOutlets": <true/false>,    // If true, outlets will be guarded by this control switch. Defaults to true.
-        "guardSwitchPorts": <true/false> // If true, switch ports will be guarded by this control switch. Defaults to true.
+        "create": <true/false>,           // Defaults to false.
+        "name": "<name>",                 // Defaults to "UniFi Control Enabled".
+        "timeout": <number>,              // Timeout (in seconds) before the control switch reverts. Defaults to 60s. 0 disables the timeout.
+        "guardOutlets": <true/false>,     // If true, outlets will be guarded by this control switch. Defaults to true.
+        "guardSwitchPorts": <true/false>, // If true, switch ports will be guarded by this control switch. Defaults to true.
+        "guardRpsPorts": <true/false>     // If true, RPS ports will be guarded by this control switch. Defaults to true.
       }
     }
   ]
@@ -83,7 +84,10 @@ Sites, devices, outlets, and/or ports can be included or excluded by their id (s
       "excludeOutlets": ["<serial number>.<index>"],
       "includeInactivePorts": <true/false>,          // Defaults to false
       "includePorts": ["<serial number>.<index>"],
-      "excludePorts": ["<serial number>.<index>"]
+      "excludePorts": ["<serial number>.<index>"],
+      "includeInactiveRpsPorts": <true/false>,       // Defaults to false
+      "includeRpsPorts": ["<serial number>.<index>"],
+      "excludeRpsPorts": ["<serial number>.<index>"]
     }
   ]
 }
