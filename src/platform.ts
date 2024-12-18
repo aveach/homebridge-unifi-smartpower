@@ -4,6 +4,7 @@ import {
   Characteristic,
   DynamicPlatformPlugin,
   Logger,
+  LogLevel,
   PlatformAccessory,
   PlatformConfig,
   Service,
@@ -26,7 +27,6 @@ import {
   UniFiControlSwitchPlatformAccessory,
   UniFiControlSwitchPlatformAccessoryContext,
 } from './platformAccessoryControlSwitch';
-import { LogLevel } from 'homebridge/lib/logger';
 
 type UniFiSmartPowerHomebridgePlatformConfig = PlatformConfig &
   UniFiControllerConfig & {
