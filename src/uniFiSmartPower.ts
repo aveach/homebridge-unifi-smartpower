@@ -1,10 +1,11 @@
 import PubSub from 'pubsub-js';
 import { Logger } from 'homebridge';
 
-import { Cache, caching } from 'cache-manager';
+import { Cache, createCache } from 'cache-manager';
 import AsyncLock from 'async-lock';
 import Token = PubSubJS.Token;
 import { Controller } from 'node-unifi';
+import { Keyv, KeyvCacheableMemory } from 'cacheable';
 
 export interface UniFiDeviceStatus {
   device: UniFiDevice;
@@ -125,17 +126,19 @@ export class UniFiSmartPower {
   private static readonly CONTROLLER_LOCK = 'CONTROLLER_LOCK';
 
   private readonly lock = new AsyncLock({ domainReentrant: true });
-  private readonly cache: Promise<Cache>;
+  private readonly cache: Cache;
   private readonly controller: Controller;
 
   constructor(
     public readonly log: Logger,
     private readonly config: UniFiControllerConfig,
   ) {
-    this.cache = caching('memory', {
-      ttl: Number.MAX_SAFE_INTEGER, // No default ttl
-      max: 0, // Infinite capacity
+    const store = new KeyvCacheableMemory({
+      ttl: undefined, // No default ttl
+      lruSize: 0, // Infinite capacity
     });
+    const keyv = new Keyv({ store });
+    this.cache = createCache({ stores: [keyv] });
     this.controller = new Controller({
       host: this.config.host,
       port: this.config.port,
@@ -252,9 +255,7 @@ export class UniFiSmartPower {
       errMsg = `device ${device.name} [${device.mac}] `;
     }
     const fetch = async (): Promise<UniFiDeviceStatus[]> => {
-      const result: UniFiDeviceStatus[] | Error = await (
-        await this.cache
-      ).wrap(
+      const result: UniFiDeviceStatus[] | Error = await this.cache.wrap(
         UniFiSmartPower.deviceCacheKey(device),
         async (): Promise<UniFiDeviceStatus[] | Error> => {
           this.log.debug('[API] Fetching status from UniFi API');
@@ -464,8 +465,8 @@ export class UniFiSmartPower {
           relay_state: outlet.index === outletIndex ? !!command : !!outlet.relayState,
         })),
       });
-      await (await this.cache).del(UniFiSmartPower.deviceCacheKey(device));
-      await (await this.cache).del(UniFiSmartPower.deviceCacheKey());
+      await this.cache.del(UniFiSmartPower.deviceCacheKey(device));
+      await this.cache.del(UniFiSmartPower.deviceCacheKey());
     });
   }
 
@@ -484,8 +485,8 @@ export class UniFiSmartPower {
           poe_mode: port.index === portIndex ? poeMode : port.poeMode,
         })),
       });
-      await (await this.cache).del(UniFiSmartPower.deviceCacheKey(device));
-      await (await this.cache).del(UniFiSmartPower.deviceCacheKey());
+      await this.cache.del(UniFiSmartPower.deviceCacheKey(device));
+      await this.cache.del(UniFiSmartPower.deviceCacheKey());
     });
   }
 
@@ -511,8 +512,8 @@ export class UniFiSmartPower {
           })),
         },
       });
-      await (await this.cache).del(UniFiSmartPower.deviceCacheKey(device));
-      await (await this.cache).del(UniFiSmartPower.deviceCacheKey());
+      await this.cache.del(UniFiSmartPower.deviceCacheKey(device));
+      await this.cache.del(UniFiSmartPower.deviceCacheKey());
     });
   }
 
