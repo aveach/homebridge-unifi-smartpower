@@ -1,13 +1,13 @@
-import { describe, it, expect, vi } from 'vitest';
 import { API } from 'homebridge';
 import { PLATFORM_NAME } from './settings';
 import { UniFiSmartPowerHomebridgePlatform } from './platform';
 import registerPlatform from './index';
+import { expect, jest } from '@jest/globals';
 
 describe('index', () => {
     it('should register the platform with Homebridge', () => {
         const api = {
-            registerPlatform: vi.fn(),
+            registerPlatform: jest.fn(),
         } as unknown as API;
 
         registerPlatform(api);
