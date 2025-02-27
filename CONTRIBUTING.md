@@ -107,5 +107,5 @@ npm publish --tag=beta
 Users can then install the _beta_ version by appending `@beta` to the install command, for example:
 
 ```
-sudo npm install -g homebridge-unifi-smartpower@beta
+sudo npm install -g homebridge-unifi-network@beta
 ```
