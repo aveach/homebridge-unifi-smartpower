@@ -1,18 +1,23 @@
-import { describe, it, expect, vi } from 'vitest';
 import { API } from 'homebridge';
 import { PLATFORM_NAME } from './settings';
 import { UniFiSmartPowerHomebridgePlatform } from './platform';
-import registerPlatform from './index';
+import { expect, jest } from '@jest/globals';
+import index from './index';
 
-describe('index', () => {
-    it('should register the platform with Homebridge', () => {
-        const api = {
-            registerPlatform: vi.fn(),
-        } as unknown as API;
+jest.mock('homebridge');
+jest.mock('./settings');
+jest.mock('./platform');
 
-        registerPlatform(api);
+describe('index.ts', () => {
+  it('should register the platform with Homebridge', () => {
+    const api = {
+      registerPlatform: jest.fn(),
+    } as unknown as API;
+    index(api);
 
-        expect(api.registerPlatform)
-        .toHaveBeenCalledWith(PLATFORM_NAME, UniFiSmartPowerHomebridgePlatform);
-    });
+    expect(api.registerPlatform).toHaveBeenCalledWith(
+      PLATFORM_NAME,
+      UniFiSmartPowerHomebridgePlatform,
+    );
+  });
 });
