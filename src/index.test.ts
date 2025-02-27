@@ -5,16 +5,14 @@ import { UniFiSmartPowerHomebridgePlatform } from './platform';
 import registerPlatform from './index';
 
 describe('index', () => {
-  it('should register the platform with Homebridge', () => {
-    const api = {
-      registerPlatform: vi.fn(),
-    } as unknown as API;
+    it('should register the platform with Homebridge', () => {
+        const api = {
+            registerPlatform: vi.fn(),
+        } as unknown as API;
 
-    registerPlatform(api);
+        registerPlatform(api);
 
-    expect(api.registerPlatform).toHaveBeenCalledWith(
-      PLATFORM_NAME,
-      UniFiSmartPowerHomebridgePlatform,
-    );
-  });
+        expect(api.registerPlatform)
+        .toHaveBeenCalledWith(PLATFORM_NAME, UniFiSmartPowerHomebridgePlatform);
+    });
 });
