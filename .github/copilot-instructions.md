@@ -1,4 +1,4 @@
-# Copilot Instructions for homebridge-unifi-network
+# Copilot Instructions for homebridge-unifi-smartpower
 
 ## Project Overview
 This is a TypeScript-based Homebridge plugin that provides HomeKit integration for UniFi SmartPower devices including PDU Pro, Smart Plugs, Smart Strips, and Gateway Pro devices. The plugin connects to UniFi controllers to monitor and control power outlets and PoE switch ports.

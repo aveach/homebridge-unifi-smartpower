@@ -67,9 +67,9 @@ jobs:
     needs: [determine-release-type, update-version, publish-release]
     uses: homebridge/.github/.github/workflows/discord-webhooks.yml@latest
     with:
-      title: "Unifi Network Release"
+      title: "Unifi SmartPower Release"
       description: |
         Version `v${{ needs.update-version.outputs.version }}`
-      url: "https://github.com/homebridge-plugins/homebridge-unifi-network/releases/tag/v${{ needs.update-version.outputs.version }}"
+      url: "https://github.com/homebridge-plugins/homebridge-unifi-smartpower/releases/tag/v${{ needs.update-version.outputs.version }}"
     secrets:
       DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL_LATEST }}

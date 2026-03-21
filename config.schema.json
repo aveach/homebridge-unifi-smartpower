@@ -13,14 +13,14 @@
         "required": true
       },
       "host": {
-        "title": "UniFi Network Host/IP Address",
+        "title": "UniFi Network SmartPower Host/IP Address",
         "type": "string",
         "default": "192.168.1.1",
         "minLength": 3,
         "required": true
       },
       "port": {
-        "title": "UniFi Network Port",
+        "title": "UniFi Network SmartPower Port",
         "type": "integer",
         "default": 443,
         "minimum": 1,
