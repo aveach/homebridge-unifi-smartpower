@@ -3,7 +3,7 @@ import { Logger } from 'homebridge';
 
 import { Cache, createCache } from 'cache-manager';
 import AsyncLock from 'async-lock';
-import Token = PubSubJS.Token;
+type Token = string;
 import { Controller } from 'node-unifi';
 import { Keyv, KeyvCacheableMemory } from 'cacheable';
 
@@ -124,10 +124,16 @@ export class UniFiSmartPower {
   private static readonly STATUS_POLL_INTERVAL_MS_MAX = 60 * 1000;
 
   private static readonly CONTROLLER_LOCK = 'CONTROLLER_LOCK';
+  private static readonly STALE_COMMAND_GUARD_MS = 5 * 1000;
 
   private readonly lock = new AsyncLock({ domainReentrant: true });
   private readonly cache: Cache;
   private readonly controller: Controller;
+  private loggedIn = false;
+  private readonly deviceSnapshots = new Map<string, UniFiDeviceStatus>();
+  private readonly devicePollers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly deviceSubscriberCount = new Map<string, number>();
+  private readonly pendingCommands = new Map<string, number>();
 
   constructor(
     public readonly log: Logger,
@@ -150,6 +156,12 @@ export class UniFiSmartPower {
 
   reset(): void {
     PubSub.clearAllSubscriptions();
+    for (const timer of this.devicePollers.values()) {
+      clearTimeout(timer);
+    }
+    this.devicePollers.clear();
+    this.deviceSubscriberCount.clear();
+    this.pendingCommands.clear();
   }
 
   subscribe(
@@ -180,39 +192,10 @@ export class UniFiSmartPower {
       token,
     );
 
-    // When this is the first subscription, start polling to publish updates.
-    if (PubSub.countSubscriptions(topic) === 1) {
-      const poll = async () => {
-        // Stop polling when there are no active subscriptions.
-        if (PubSub.countSubscriptions(topic) === 0) {
-          this.log.debug('[API] There are no status subscriptions; skipping poll');
-          return;
-        }
-        // Acquire the status lock before emitting any new events.
-        try {
-          switch (kind) {
-            case UniFiDeviceKind.OUTLET:
-              this.log.debug('[API] Polling status for outlet %s.%s', device.mac, index);
-              PubSub.publish(topic, await this.getOutletStatus(device, index));
-              break;
-            case UniFiDeviceKind.PORT:
-              this.log.debug('[API] Polling status for port %s.%s', device.mac, index);
-              PubSub.publish(topic, await this.getPortStatus(device, index));
-              break;
-            case UniFiDeviceKind.RPS_PORT:
-              this.log.debug('[API] Polling status for RPS port %s.%s', device.mac, index);
-              PubSub.publish(topic, await this.getRpsPortStatus(device, index));
-              break;
-            default:
-              // noinspection ExceptionCaughtLocallyJS
-              throw new Error('unknown device status kind=%d', kind);
-          }
-        } catch (error: unknown) {
-          // Nothing to do here. The error has already been logged.
-        }
-        setTimeout(poll, this.statusPollIntervalMs);
-      };
-      setTimeout(poll, 0);
+    const subscribers = (this.deviceSubscriberCount.get(device.id) ?? 0) + 1;
+    this.deviceSubscriberCount.set(device.id, subscribers);
+    if (subscribers === 1) {
+      this.startDevicePoller(device);
     }
     return token;
   }
@@ -225,12 +208,15 @@ export class UniFiSmartPower {
   async getSites(): Promise<UniFiSite[]> {
     return this.lock.acquire(UniFiSmartPower.CONTROLLER_LOCK, async () => {
       this.log.debug('[API] Fetching sites from UniFi API');
-      await this.controller.login();
-      return (await this.controller.getSitesStats())
+      const sites = (await this.withSession(() => this.controller.getSitesStats())) as Array<{
+        name?: string;
+        desc?: string;
+      }>;
+      return sites
         .filter(({ name }) => !!name)
         .map(({ name: id, desc: name }) => ({
-          id,
-          name,
+          id: id as string,
+          name: name as string,
         }));
     });
   }
@@ -263,8 +249,9 @@ export class UniFiSmartPower {
           let result: UniFiApiDevice[] = [],
             error: Error | null = null;
           try {
-            await this.controller.login();
-            result = await this.controller.getAccessDevices(device?.mac ?? '');
+            result = await this.withSession(() =>
+              this.controller.getAccessDevices(device?.mac ?? ''),
+            );
           } catch (e: unknown) {
             error = e as Error;
             this.log.error(
@@ -291,6 +278,9 @@ export class UniFiSmartPower {
       );
       if (result instanceof Error) {
         throw result;
+      }
+      for (const status of result) {
+        this.deviceSnapshots.set(status.device.id, status);
       }
       return result;
     };
@@ -456,17 +446,27 @@ export class UniFiSmartPower {
     command: UniFiSmartPowerOutletAction,
   ): Promise<void> {
     return this.lock.acquire(UniFiSmartPower.CONTROLLER_LOCK, async () => {
-      const { outlets } = await this.getDeviceStatus(device, false);
+      const status = await this.getCachedOrFreshDeviceStatus(device);
       this.controller.opts.site = device.site;
-      await this.controller.login();
-      await this.controller.setDeviceSettingsBase(device.id, {
-        outlet_overrides: outlets.map((outlet) => ({
-          ...outlet.override,
-          relay_state: outlet.index === outletIndex ? !!command : !!outlet.relayState,
-        })),
-      });
-      await this.cache.del(UniFiSmartPower.deviceCacheKey(device));
-      await this.cache.del(UniFiSmartPower.deviceCacheKey());
+      await this.withSession(() =>
+        this.controller.setDeviceSettingsBase(device.id, {
+          outlet_overrides: status.outlets.map((outlet) => ({
+            ...outlet.override,
+            relay_state: outlet.index === outletIndex ? !!command : !!outlet.relayState,
+          })),
+        }),
+      );
+      const outlet = status.outlets.find(({ index }) => index === outletIndex);
+      if (outlet) {
+        outlet.relayState = command === UniFiSmartPowerOutletAction.ON
+          ? UniFiSmartPowerOutletState.ON
+          : UniFiSmartPowerOutletState.OFF;
+        outlet.override = { ...outlet.override, relay_state: !!command };
+      }
+      this.deviceSnapshots.set(device.id, status);
+      await this.invalidateStatusCache(device);
+      this.publishDeviceStatus(status);
+      this.markPending(device, UniFiDeviceKind.OUTLET, outletIndex);
     });
   }
 
@@ -476,17 +476,25 @@ export class UniFiSmartPower {
     poeMode: UniFiSwitchPortPoeModeAction,
   ): Promise<void> {
     return this.lock.acquire(UniFiSmartPower.CONTROLLER_LOCK, async () => {
-      const { ports } = await this.getDeviceStatus(device, false);
+      const status = await this.getCachedOrFreshDeviceStatus(device);
       this.controller.opts.site = device.site;
-      await this.controller.login();
-      await this.controller.setDeviceSettingsBase(device.id, {
-        port_overrides: ports.map((port) => ({
-          ...port.override,
-          poe_mode: port.index === portIndex ? poeMode : port.poeMode,
-        })),
-      });
-      await this.cache.del(UniFiSmartPower.deviceCacheKey(device));
-      await this.cache.del(UniFiSmartPower.deviceCacheKey());
+      await this.withSession(() =>
+        this.controller.setDeviceSettingsBase(device.id, {
+          port_overrides: status.ports.map((port) => ({
+            ...port.override,
+            poe_mode: port.index === portIndex ? poeMode : port.poeMode,
+          })),
+        }),
+      );
+      const port = status.ports.find(({ index }) => index === portIndex);
+      if (port) {
+        port.poeMode = poeMode;
+        port.override = { ...port.override, poe_mode: poeMode };
+      }
+      this.deviceSnapshots.set(device.id, status);
+      await this.invalidateStatusCache(device);
+      this.publishDeviceStatus(status);
+      this.markPending(device, UniFiDeviceKind.PORT, portIndex);
     });
   }
 
@@ -496,25 +504,151 @@ export class UniFiSmartPower {
     command: UniFiRpsPortAction,
   ): Promise<void> {
     return this.lock.acquire(UniFiSmartPower.CONTROLLER_LOCK, async () => {
-      const { rpsPorts } = await this.getDeviceStatus(device, false);
+      const status = await this.getCachedOrFreshDeviceStatus(device);
+      const portMode = command === UniFiRpsPortAction.ON ? 'auto' : 'disabled';
       this.controller.opts.site = device.site;
-      await this.controller.login();
-      await this.controller.setDeviceSettingsBase(device.id, {
-        rps_override: {
-          rps_port_table: rpsPorts.map((port) => ({
-            ...port.override,
-            port_mode:
-              port.index === portIndex
-                ? command === UniFiRpsPortAction.ON
-                  ? 'auto'
-                  : 'disabled'
-                : port.portMode,
-          })),
-        },
-      });
-      await this.cache.del(UniFiSmartPower.deviceCacheKey(device));
-      await this.cache.del(UniFiSmartPower.deviceCacheKey());
+      await this.withSession(() =>
+        this.controller.setDeviceSettingsBase(device.id, {
+          rps_override: {
+            rps_port_table: status.rpsPorts.map((port) => ({
+              ...port.override,
+              port_mode: port.index === portIndex ? portMode : port.portMode,
+            })),
+          },
+        }),
+      );
+      const port = status.rpsPorts.find(({ index }) => index === portIndex);
+      if (port) {
+        port.portMode = portMode;
+        port.override = { ...port.override, port_mode: portMode };
+      }
+      this.deviceSnapshots.set(device.id, status);
+      await this.invalidateStatusCache(device);
+      this.publishDeviceStatus(status);
+      this.markPending(device, UniFiDeviceKind.RPS_PORT, portIndex);
     });
+  }
+
+  private async getCachedOrFreshDeviceStatus(device: UniFiDevice): Promise<UniFiDeviceStatus> {
+    const snapshot = this.deviceSnapshots.get(device.id);
+    if (snapshot) {
+      return snapshot;
+    }
+    return this.getDeviceStatus(device, false);
+  }
+
+  private async invalidateStatusCache(device: UniFiDevice): Promise<void> {
+    await this.cache.del(UniFiSmartPower.deviceCacheKey(device));
+    await this.cache.del(UniFiSmartPower.deviceCacheKey());
+  }
+
+  private startDevicePoller(device: UniFiDevice): void {
+    const poll = async () => {
+      if ((this.deviceSubscriberCount.get(device.id) ?? 0) === 0) {
+        this.devicePollers.delete(device.id);
+        return;
+      }
+      try {
+        this.log.debug('[API] Polling status for device %s [%s]', device.name, device.mac);
+        const status = await this.getDeviceStatus(device);
+        this.publishDeviceStatus(status);
+      } catch {
+        // Already logged in getDeviceStatuses.
+      }
+      if ((this.deviceSubscriberCount.get(device.id) ?? 0) === 0) {
+        this.devicePollers.delete(device.id);
+        return;
+      }
+      this.devicePollers.set(
+        device.id,
+        setTimeout(poll, this.statusPollIntervalMs),
+      );
+    };
+    this.devicePollers.set(device.id, setTimeout(poll, 0));
+  }
+
+  private publishDeviceStatus(status: UniFiDeviceStatus): void {
+    for (const outlet of status.outlets) {
+      if (!this.isPending(status.device, UniFiDeviceKind.OUTLET, outlet.index)) {
+        PubSub.publish(
+          UniFiSmartPower.statusTopic(status.device, UniFiDeviceKind.OUTLET, outlet.index),
+          outlet,
+        );
+      }
+    }
+    for (const port of status.ports) {
+      if (!this.isPending(status.device, UniFiDeviceKind.PORT, port.index)) {
+        PubSub.publish(
+          UniFiSmartPower.statusTopic(status.device, UniFiDeviceKind.PORT, port.index),
+          port,
+        );
+      }
+    }
+    for (const rpsPort of status.rpsPorts) {
+      if (!this.isPending(status.device, UniFiDeviceKind.RPS_PORT, rpsPort.index)) {
+        PubSub.publish(
+          UniFiSmartPower.statusTopic(status.device, UniFiDeviceKind.RPS_PORT, rpsPort.index),
+          rpsPort,
+        );
+      }
+    }
+  }
+
+  private markPending(device: UniFiDevice, kind: UniFiDeviceKind, index: number): void {
+    this.pendingCommands.set(
+      UniFiSmartPower.pendingKey(device, kind, index),
+      Date.now() + UniFiSmartPower.STALE_COMMAND_GUARD_MS,
+    );
+  }
+
+  private isPending(device: UniFiDevice, kind: UniFiDeviceKind, index: number): boolean {
+    const key = UniFiSmartPower.pendingKey(device, kind, index);
+    const expires = this.pendingCommands.get(key);
+    if (expires === undefined) {
+      return false;
+    }
+    if (Date.now() >= expires) {
+      this.pendingCommands.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  private async withSession<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      await this.ensureLoggedIn();
+      return await fn();
+    } catch (error: unknown) {
+      if (!UniFiSmartPower.isAuthError(error)) {
+        throw error;
+      }
+      this.log.debug('[API] Session expired; logging in again');
+      this.loggedIn = false;
+      await this.ensureLoggedIn();
+      return fn();
+    }
+  }
+
+  private async ensureLoggedIn(): Promise<void> {
+    if (this.loggedIn) {
+      return;
+    }
+    await this.controller.login();
+    this.loggedIn = true;
+  }
+
+  private static isAuthError(error: unknown): boolean {
+    const message = `${(<Error>error)?.message ?? error} ${JSON.stringify(error)}`.toLowerCase();
+    return (
+      message.includes('loginrequired') ||
+      message.includes('unauthorized') ||
+      message.includes('status code 401') ||
+      message.includes('api.err.login')
+    );
+  }
+
+  private static pendingKey(device: UniFiDevice, kind: UniFiDeviceKind, index: number): string {
+    return `${device.id}.${kind}.${index}`;
   }
 
   private get statusCacheTtlMs(): number {

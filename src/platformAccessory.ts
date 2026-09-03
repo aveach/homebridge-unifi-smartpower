@@ -33,6 +33,8 @@ export class UniFiSmartPowerOutletPlatformAccessory {
 
   private status = UniFiSmartPowerOutletState.UNKNOWN;
   private inUse = UniFiPortOrOutletInUse.UNKNOWN;
+  private statusCharacteristic!: Characteristic;
+  private lastCommandAt = 0;
 
   constructor(
     private readonly platform: UniFiSmartPowerHomebridgePlatform,
@@ -48,16 +50,19 @@ export class UniFiSmartPowerOutletPlatformAccessory {
     this.outletIndex = this.outlet.index;
     this.outletName = this.outlet.name;
     this.id = `${this.serialNumber}.${this.outletIndex}`;
+    this.status = this.outlet.relayState;
+    this.inUse = this.outlet.inUse;
 
     const outletService = (this.accessory.getServiceById(this.platform.Service.Outlet, this.id) ||
       this.accessory.addService(this.platform.Service.Outlet, this.outletName, this.id))!
       .setCharacteristic(this.platform.Characteristic.Name, this.outletName)
       .setCharacteristic(this.platform.Characteristic.ConfiguredName, this.outletName);
 
-    const statusCharacteristic = outletService
+    this.statusCharacteristic = outletService
       .getCharacteristic(this.platform.Characteristic.On)
       .onSet(this.setOn.bind(this))
       .onGet(this.getOn.bind(this));
+    const statusCharacteristic = this.statusCharacteristic;
     const inUseCharacteristic: Characteristic | null =
       outlet.inUse !== UniFiPortOrOutletInUse.UNKNOWN
         ? outletService
@@ -70,7 +75,13 @@ export class UniFiSmartPowerOutletPlatformAccessory {
       UniFiDeviceKind.OUTLET,
       this.outletIndex,
       (({ relayState, inUse }) => {
-        if (this.status !== relayState && relayState !== UniFiSmartPowerOutletState.UNKNOWN) {
+        const ignoreStaleOn =
+          Date.now() - this.lastCommandAt < 5000 && relayState !== this.status;
+        if (
+          !ignoreStaleOn &&
+          this.status !== relayState &&
+          relayState !== UniFiSmartPowerOutletState.UNKNOWN
+        ) {
           this.log.debug(
             '[%s] Received outlet subscription status update: %s -> %s',
             this.outletName,
@@ -104,6 +115,11 @@ export class UniFiSmartPowerOutletPlatformAccessory {
       throw new this.hap.HapStatusError(this.hap.HAPStatus.READ_ONLY_CHARACTERISTIC);
     }
     this.log.debug('[%s] Set Characteristic On ->', this.outletName, value);
+    const previous = this.status;
+    const next = value ? UniFiSmartPowerOutletState.ON : UniFiSmartPowerOutletState.OFF;
+    this.status = next;
+    this.lastCommandAt = Date.now();
+    this.statusCharacteristic.updateValue(!!value);
     try {
       await this.uniFiSmartPower.commandOutlet(
         this.context.device,
@@ -111,6 +127,8 @@ export class UniFiSmartPowerOutletPlatformAccessory {
         value ? UniFiSmartPowerOutletAction.ON : UniFiSmartPowerOutletAction.OFF,
       );
     } catch (error: unknown) {
+      this.status = previous;
+      this.statusCharacteristic.updateValue(previous === UniFiSmartPowerOutletState.ON);
       this.log.error(
         '[%s] An error occurred setting Characteristic On; %s',
         this.outletName,
@@ -158,6 +176,8 @@ export class UniFiSwitchPortPlatformAccessory {
 
   private poeMode: UniFiSwitchPortPoeMode = 'unknown';
   private inUse = UniFiPortOrOutletInUse.UNKNOWN;
+  private statusCharacteristic!: Characteristic;
+  private lastCommandAt = 0;
 
   constructor(
     private readonly platform: UniFiSmartPowerHomebridgePlatform,
@@ -174,16 +194,19 @@ export class UniFiSwitchPortPlatformAccessory {
     this.portName = this.port.name;
     this.portPoeOnAction = this.port.poeOnAction;
     this.id = `${this.serialNumber}.${this.portIndex}`;
+    this.poeMode = this.port.poeMode;
+    this.inUse = this.port.inUse;
 
     const outletService = (this.accessory.getServiceById(this.platform.Service.Outlet, this.id) ||
       this.accessory.addService(this.platform.Service.Outlet, this.portName, this.id))!
       .setCharacteristic(this.platform.Characteristic.Name, this.portName)
       .setCharacteristic(this.platform.Characteristic.ConfiguredName, this.portName);
 
-    const statusCharacteristic = outletService
+    this.statusCharacteristic = outletService
       .getCharacteristic(this.platform.Characteristic.On)
       .onSet(this.setOn.bind(this))
       .onGet(this.getOn.bind(this));
+    const statusCharacteristic = this.statusCharacteristic;
     const inUseCharacteristic: Characteristic | null =
       port.inUse !== UniFiPortOrOutletInUse.UNKNOWN
         ? outletService
@@ -195,7 +218,9 @@ export class UniFiSwitchPortPlatformAccessory {
       poeMode,
       inUse,
     }) => {
-      if (this.poeMode !== poeMode && poeMode !== 'unknown') {
+      const ignoreStaleOn =
+        Date.now() - this.lastCommandAt < 5000 && poeMode !== this.poeMode;
+      if (!ignoreStaleOn && this.poeMode !== poeMode && poeMode !== 'unknown') {
         this.log.debug(
           '[%s] Received port subscription status update: %s -> %s',
           this.portName,
@@ -228,6 +253,11 @@ export class UniFiSwitchPortPlatformAccessory {
       throw new this.hap.HapStatusError(this.hap.HAPStatus.READ_ONLY_CHARACTERISTIC);
     }
     this.log.debug('[%s] Set Characteristic On ->', this.portName, value);
+    const previous = this.poeMode;
+    const next: UniFiSwitchPortPoeMode = value ? this.portPoeOnAction : 'off';
+    this.poeMode = next;
+    this.lastCommandAt = Date.now();
+    this.statusCharacteristic.updateValue(!!value);
     try {
       await this.uniFiSmartPower.commandPort(
         this.context.device,
@@ -235,6 +265,8 @@ export class UniFiSwitchPortPlatformAccessory {
         value ? this.portPoeOnAction : 'off',
       );
     } catch (error: unknown) {
+      this.poeMode = previous;
+      this.statusCharacteristic.updateValue(previous !== 'off');
       this.log.error(
         '[%s] An error occurred setting Characteristic On; %s',
         this.portName,
@@ -278,6 +310,8 @@ export class UniFiRpsPortPlatformAccessory {
 
   private portMode: UniFiRpsPortMode | 'unknown' = 'unknown';
   private inUse = UniFiPortOrOutletInUse.UNKNOWN;
+  private statusCharacteristic!: Characteristic;
+  private lastCommandAt = 0;
 
   constructor(
     private readonly platform: UniFiSmartPowerHomebridgePlatform,
@@ -293,16 +327,19 @@ export class UniFiRpsPortPlatformAccessory {
     this.portIndex = this.rpsPort.index;
     this.portName = this.rpsPort.name;
     this.id = `${this.serialNumber}.${this.portIndex}`;
+    this.portMode = this.rpsPort.portMode;
+    this.inUse = this.rpsPort.inUse;
 
     const outletService = (this.accessory.getServiceById(this.platform.Service.Outlet, this.id) ||
       this.accessory.addService(this.platform.Service.Outlet, this.portName, this.id))!
       .setCharacteristic(this.platform.Characteristic.Name, this.portName)
       .setCharacteristic(this.platform.Characteristic.ConfiguredName, this.portName);
 
-    const statusCharacteristic = outletService
+    this.statusCharacteristic = outletService
       .getCharacteristic(this.platform.Characteristic.On)
       .onSet(this.setOn.bind(this))
       .onGet(this.getOn.bind(this));
+    const statusCharacteristic = this.statusCharacteristic;
     const inUseCharacteristic: Characteristic | null =
       rpsPort.inUse !== UniFiPortOrOutletInUse.UNKNOWN
         ? outletService
@@ -315,7 +352,9 @@ export class UniFiRpsPortPlatformAccessory {
       UniFiDeviceKind.RPS_PORT,
       this.portIndex,
       (({ portMode, inUse }) => {
-        if (this.portMode !== portMode) {
+        const ignoreStaleOn =
+          Date.now() - this.lastCommandAt < 5000 && portMode !== this.portMode;
+        if (!ignoreStaleOn && this.portMode !== portMode) {
           this.log.debug(
             '[%s] Received RPS port subscription status update: %s -> %s',
             this.portName,
@@ -349,6 +388,11 @@ export class UniFiRpsPortPlatformAccessory {
       throw new this.hap.HapStatusError(this.hap.HAPStatus.READ_ONLY_CHARACTERISTIC);
     }
     this.log.debug('[%s] Set Characteristic On ->', this.portName, value);
+    const previous = this.portMode;
+    const next: UniFiRpsPortMode = value ? 'auto' : 'disabled';
+    this.portMode = next;
+    this.lastCommandAt = Date.now();
+    this.statusCharacteristic.updateValue(!!value);
     try {
       await this.uniFiSmartPower.commandRpsPort(
         this.context.device,
@@ -356,6 +400,8 @@ export class UniFiRpsPortPlatformAccessory {
         value ? UniFiRpsPortAction.ON : UniFiRpsPortAction.OFF,
       );
     } catch (error: unknown) {
+      this.portMode = previous;
+      this.statusCharacteristic.updateValue(previous !== 'disabled');
       this.log.error(
         '[%s] An error occurred setting Characteristic On; %s',
         this.portName,
